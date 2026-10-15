@@ -7,7 +7,7 @@ import intent
 import providers
 import quran
 import recitation
-from render import render_ayah, render_reply
+from display_render import render_ayah, render_reply
 
 
 @dataclass
