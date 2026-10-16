@@ -88,7 +88,7 @@ def transcribe(wav_bytes: bytes) -> str:
             file=audio_file,
             model="whisper-large-v3",
             response_format="text"
-            language="ml"
+            
         )
         return (response or "").strip()
     except Exception as e:
