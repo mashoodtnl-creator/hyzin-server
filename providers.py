@@ -63,56 +63,67 @@ def identity_answer(text: str) -> str | None:
 
 
 _gemini_client_instance = None
-
 _deepseek_client_instance = None
 
 def _gemini_client():
     global _deepseek_client_instance
     if _deepseek_client_instance is None:
-        key = os.environ.get("DEEPSEEK_API_KEY")
+        key = os.environ.get("GROQ_API_KEY")
         if not key:
-            raise RuntimeError("DEEPSEEK_API_KEY not configured")
+            raise RuntimeError("GROQ_API_KEY not configured")
         from openai import OpenAI
         _deepseek_client_instance = OpenAI(
             api_key=key,
-            base_url="https://api.deepseek.com"
+            base_url="https://api.groq.com/openai/v1"
         )
     return _deepseek_client_instance
-    return _gemini_client_instance
 
 
 def transcribe(wav_bytes: bytes) -> str:
-    response = _gemini_client().models.generate_content(
-        model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
-        contents=["Transcribe this child's speech exactly in its spoken language. Return only the words; "
-                  "if there is no clear speech, return [NO_SPEECH].",
-                  types.Part.from_bytes(data=wav_bytes, mime_type="audio/wav")],
-    )
-    return (response.text or "").strip()
+    import io
+    audio_file = io.BytesIO(wav_bytes)
+    audio_file.name = "audio.wav"
+    try:
+        response = _gemini_client().audio.transcriptions.create(
+            file=audio_file,
+            model="whisper-large-v3",
+            response_format="text"
+        )
+        return (response or "").strip()
+    except Exception as e:
+        print(f"[transcribe] Error: {e}")
+        return "[NO_SPEECH]"
 
 
 
 def transcribe_arabic(wav_bytes: bytes) -> str:
-    response = _gemini_client().models.generate_content(
-        model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
-        contents=["Transcribe this child's Quran recitation in Arabic script only. "
-                  "Do not correct or fill in missing words. Return only the words actually heard; "
-                  "if unclear, return [NO_SPEECH].",
-                  types.Part.from_bytes(data=wav_bytes, mime_type="audio/wav")],
-    )
-    return (response.text or "").strip()
+    import io
+    audio_file = io.BytesIO(wav_bytes)
+    audio_file.name = "audio.wav"
+    try:
+        response = _gemini_client().audio.transcriptions.create(
+            file=audio_file,
+            model="whisper-large-v3",
+            language="ar",
+            response_format="text"
+        )
+        return (response or "").strip()
+    except Exception as e:
+        print(f"[transcribe_arabic] Error: {e}")
+        return "[NO_SPEECH]"
 
 def answer(question: str) -> str:
     fixed = identity.answer(question)
     if fixed:
         return fixed
-    response = _deepseek_client().chat.completions.create(
-        model=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+    response = _gemini_client().chat.completions.create(
+        model=os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": question},
         ],
         temperature=0.4,
+        max_tokens=512,
     )
     return (response.choices[0].message.content or "").strip()
 
