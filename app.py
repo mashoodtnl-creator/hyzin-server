@@ -89,14 +89,15 @@ async def talk(request: Request, x_device_token: str | None = Header(default=Non
             mood = result.mood
         else:
             transcript = await run_in_threadpool(providers.transcribe, data)
-if not transcript or transcript == "[NO_SPEECH]":
-    # FIX: 422 error തരാതെ soft fallback തരുന്നു
-    print("[FIX] No speech detected, using fallback")
-    transcript = "hello"
-command = intent.parse(transcript)
-if command is None and intent.looks_quran_related(transcript):
- command = await run_in_threadpool(intent.fallback, transcript)
-if command:
+            if not transcript or transcript == "[NO_SPEECH]":
+                print("[FIX] No speech detected, using fallback")
+                transcript = "hello"
+
+            command = intent.parse(transcript)
+            if command is None and intent.looks_quran_related(transcript):
+                command = await run_in_threadpool(intent.fallback, transcript)
+
+            if command:
                 result, state = await run_in_threadpool(quran_flow.handle_command, command, active)
                 _sessions[session_id] = state
                 text, audio, display = result.text, result.audio, result.display
