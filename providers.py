@@ -117,7 +117,7 @@ def answer(question: str) -> str:
     if fixed:
         return fixed
     response = _gemini_client().chat.completions.create(
-        model=os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        model=os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant"),
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": question},
