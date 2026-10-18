@@ -88,8 +88,6 @@ def transcribe(wav_bytes: bytes) -> str:
             file=audio_file,
             model="whisper-large-v3",
             response_format="text"
-                        
-            
         )
         return (response or "").strip()
     except Exception as e:
@@ -115,7 +113,7 @@ def transcribe_arabic(wav_bytes: bytes) -> str:
         return "[NO_SPEECH]"
 
 def answer(question: str) -> str:
-    fixed = identity.answer(question)
+    fixed = identity_answer(question)
     if fixed:
         return fixed
     response = _gemini_client().chat.completions.create(
