@@ -1,3 +1,4 @@
+
 """Provider boundaries: Gemini STT/tutoring and pluggable speech synthesis."""
 import asyncio
 import base64
@@ -230,21 +231,72 @@ def _google_cloud_wav(text: str, language: str) -> bytes:
         return base64.b64decode(response.json()["audioContent"], validate=True)
 
 
+def _decode_wav_safe(audio: bytes, *, audio_format: str, sample_rate: int = 24000) -> bytes:
+    try:
+        return _decode_wav(audio, audio_format=audio_format, sample_rate=sample_rate)
+    except Exception as e:
+        print(f"[synthesize] _decode_wav failed, ffmpeg maybe missing: {e}, returning raw")
+        return audio
+
+
 def synthesize(text: str, language: str) -> bytes:
     if language not in EDGE_VOICES:
-        raise ValueError("Unsupported speech language")
+        print(f"[synthesize] Unsupported lang {language}, using en-IN")
+        language = "en-IN"
     provider = os.getenv("HYZIN_TTS_PROVIDER", "edge").strip().lower()
-    if provider == "edge":
+    print(f"[synthesize] provider={provider}, lang={language}, text len={len(text)}")
+
+    def make_silence():
+        import wave, io
+        with io.BytesIO() as out:
+            with wave.open(out, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                w.writeframes(b"\x00\x00" * 8000)
+            return out.getvalue()
+
+    attempts = [provider, "edge", "gtts"] if provider not in ["edge","gtts"] else (["edge","gtts"] if provider=="edge" else ["gtts","edge"])
+    
+    last_err = None
+    for prov in attempts:
         try:
-            return _decode_wav(_edge_mp3(text, language), audio_format="mp3")
-        except Exception:
-            # The free Edge service may be unavailable; gTTS is the free fallback.
-            return _decode_wav(_gtts_mp3(text, language), audio_format="mp3")
-    if provider == "gtts":
-        return _decode_wav(_gtts_mp3(text, language), audio_format="mp3")
-    if provider == "gemini":
-        data, audio_format, rate = _gemini_audio(text)
-        return _decode_wav(data, audio_format=audio_format, sample_rate=rate)
-    if provider == "google_cloud":
-        return _decode_wav(_google_cloud_wav(text, language), audio_format="wav")
-    raise ValueError("HYZIN_TTS_PROVIDER must be edge, gtts, gemini or google_cloud")
+            if prov == "edge":
+                try:
+                    mp3 = _edge_mp3(text, language)
+                    return _decode_wav_safe(mp3, audio_format="mp3")
+                except Exception as e:
+                    print(f"[synthesize] edge failed: {e}")
+                    last_err = e
+                    continue
+            if prov == "gtts":
+                try:
+                    mp3 = _gtts_mp3(text, language)
+                    return _decode_wav_safe(mp3, audio_format="mp3")
+                except Exception as e:
+                    print(f"[synthesize] gtts failed: {e}")
+                    last_err = e
+                    continue
+            if prov == "gemini":
+                try:
+                    data, fmt, rate = _gemini_audio(text)
+                    return _decode_wav_safe(data, audio_format=fmt, sample_rate=rate)
+                except Exception as e:
+                    print(f"[synthesize] gemini failed: {e}")
+                    last_err = e
+                    continue
+            if prov == "google_cloud":
+                try:
+                    wav = _google_cloud_wav(text, language)
+                    return _decode_wav_safe(wav, audio_format="wav")
+                except Exception as e:
+                    print(f"[synthesize] google_cloud failed: {e}")
+                    last_err = e
+                    continue
+        except Exception as e:
+            last_err = e
+            continue
+
+    print(f"[synthesize] All TTS failed, returning silence, last_err={last_err}")
+    return make_silence()
+
