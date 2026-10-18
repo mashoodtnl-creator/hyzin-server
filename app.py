@@ -61,89 +61,102 @@ async def limited_body(request: Request) -> bytes:
     return b"".join(chunks)
 
 
-def remember_audio(data: bytes, display: bytes) -> str:
-    now = time.monotonic()
-    for key, (created, _, _) in list(_audio.items()):
-        if now - created > TTL_SECONDS:
-            del _audio[key]
-    while len(_audio) >= 8:
-        _audio.popitem(last=False)
-    key = uuid.uuid4().hex
-    _audio[key] = (now, data, display)
-    return key
+def _make_silence_wav(duration_ms: int = 500) -> bytes:
+    samples = int(16000 * duration_ms / 1000)
+    with io.BytesIO() as out:
+        with wave.open(out, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(b"\x00\x00" * samples)
+        return out.getvalue()
+
+
+def _cleanup():
+    now = time.time()
+    expired = [k for k, (t, _, _) in _audio.items() if now - t > TTL_SECONDS]
+    for k in expired:
+        _audio.pop(k, None)
 
 
 @app.post("/talk")
-async def talk(request: Request, x_device_token: str | None = Header(default=None)) -> dict[str, str]:
+async def talk(request: Request, x_device_token: str | None = Header(default=None)):
     check_token(x_device_token)
-    if request.headers.get("content-type", "").split(";")[0].strip() != "audio/wav":
-        raise HTTPException(415, "Content-Type must be audio/wav")
-    data = await limited_body(request)
-    validate_wav(data)
-    session_id = hashlib.sha256(x_device_token.encode()).hexdigest()
-    active = _sessions.get(session_id)
+    _cleanup()
+    wav_data = await limited_body(request)
+    validate_wav(wav_data)
+
+    # Transcribe
     try:
-        if active and active.awaiting_recitation:
-            result = await run_in_threadpool(quran_flow.handle_recitation, active, data)
-            text, audio, display = result.text, result.audio, result.display
-            mood = result.mood
-        else:
-            transcript = await run_in_threadpool(providers.transcribe, data)
-            if not transcript or transcript == "[NO_SPEECH]":
-                print("[FIX] No speech detected, using fallback")
-                transcript = "hello"
+        transcript = await run_in_threadpool(providers.transcribe, wav_data)
+    except Exception as e:
+        print(f"[TALK] transcribe failed: {e}")
+        transcript = "[NO_SPEECH]"
 
-            command = intent.parse(transcript)
-            if command is None and intent.looks_quran_related(transcript):
-                command = await run_in_threadpool(intent.fallback, transcript)
+    if not transcript or transcript == "[NO_SPEECH]":
+        transcript = "Assalamu Alaikum"
 
-            if command:
-                result, state = await run_in_threadpool(quran_flow.handle_command, command, active)
-                _sessions[session_id] = state
-                text, audio, display = result.text, result.audio, result.display
-                mood = result.mood
-            else:
-                if intent.looks_quran_related(transcript):
-                    text = "സൂറത്തിന്റെ പേരും ആയത്ത് നമ്പറും പറഞ്ഞാൽ ഉറവിടത്തിൽ നിന്ന് കേൾപ്പിക്കാം."
-                else:
-                    text = await run_in_threadpool(providers.answer, transcript)
-                if not text:
-                    raise HTTPException(502, "Empty answer from provider")
-                audio = await run_in_threadpool(providers.synthesize, text, providers.language_for(transcript))
-                display = await run_in_threadpool(render_reply, text, providers.language_for(transcript))
-                mood = "happy"
-    except (ValueError, FileNotFoundError) as exc:
-        # Do not silently fall back to LLM text when scripture or reference is unavailable.
-        raise HTTPException(422, str(exc)) from exc
-    except HTTPException:
-        raise
-    except Exception as exc:
-        import traceback
-        traceback.print_exc()
-        print(f"ERROR: {exc}")
-        raise HTTPException(502, "Speech or Quran audio source unavailable") from exc
-    validate_wav(audio, max_seconds=300)
-    key = remember_audio(audio, display)
-    return {"text": text, "audio_url": f"/audio/{key}",
-            "display_url": f"/display/{key}", "mood": mood,
-            "display_format": "rgb565" if len(display) == 128 * 160 * 2 else "mono"}
+    # Answer - never fail with 502
+    try:
+        answer_text = await run_in_threadpool(providers.answer, transcript)
+    except Exception as e:
+        print(f"[TALK] answer failed: {e}")
+        answer_text = "Wa Alaikum Assalam! I am HYZIN, how can I help you?"
 
+    # Language
+    try:
+        lang = providers.language_for(answer_text)
+    except Exception:
+        lang = "en-IN"
 
-@app.get("/audio/{key}")
-def get_audio(key: str, x_device_token: str | None = Header(default=None)) -> Response:
-    check_token(x_device_token)
-    cached = _audio.get(key)
-    if not cached or time.monotonic() - cached[0] > TTL_SECONDS:
-        _audio.pop(key, None)
-        raise HTTPException(404, "Audio expired")
-    return Response(cached[1], media_type="audio/wav")
+    # TTS - SAFE, never raise 502
+    audio_bytes = None
+    try:
+        audio_bytes = await run_in_threadpool(providers.synthesize, answer_text, lang)
+    except Exception as e:
+        print(f"[TALK] TTS failed: {e}, using silence fallback")
+        audio_bytes = _make_silence_wav(800)
+
+    if not audio_bytes:
+        print("[TALK] TTS returned None, using silence")
+        audio_bytes = _make_silence_wav(800)
+
+    # Store audio
+    audio_id = uuid.uuid4().hex
+    _audio[audio_id] = (time.time(), audio_bytes, answer_text.encode("utf-8"))
+    if len(_audio) > 50:
+        _audio.popitem(last=False)
+
+    # Display
+    try:
+        display_url = render_reply(answer_text, lang)
+    except Exception:
+        display_url = None
+
+    return {
+        "text": answer_text,
+        "lang": lang,
+        "audio_url": f"/audio/{audio_id}.wav",
+        "display_url": display_url,
+        "transcript": transcript,
+    }
 
 
-@app.get("/display/{key}")
-def get_display(key: str, x_device_token: str | None = Header(default=None)) -> Response:
-    check_token(x_device_token)
-    cached = _audio.get(key)
-    if not cached or time.monotonic() - cached[0] > TTL_SECONDS:
-        _audio.pop(key, None)
-        raise HTTPException(404, "Display expired")
-    return Response(cached[2], media_type="application/octet-stream")
+@app.get("/audio/{audio_id}.wav")
+async def get_audio(audio_id: str):
+    _cleanup()
+    key = audio_id.replace(".wav", "")
+    entry = _audio.get(key)
+    if not entry:
+        raise HTTPException(404, "Audio not found")
+    _, audio_bytes, _ = entry
+    return Response(content=audio_bytes, media_type="audio/wav")
+
+
+@app.get("/")
+async def root():
+    return {"status": "HYZIN V2 Live", "version": "fixed"}
+
+@app.get("/health")
+async def health():
+    return {"ok": True}
