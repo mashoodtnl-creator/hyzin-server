@@ -1,4 +1,3 @@
-
 """Provider boundaries: Gemini STT/tutoring and pluggable speech synthesis."""
 import asyncio
 import base64
@@ -299,4 +298,3 @@ def synthesize(text: str, language: str) -> bytes:
 
     print(f"[synthesize] All TTS failed, returning silence, last_err={last_err}")
     return make_silence()
-
