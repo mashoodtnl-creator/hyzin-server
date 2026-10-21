@@ -1,113 +1,117 @@
 import os
 import io
+import base64
 import tempfile
-from pathlib import Path
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
-# ---------- STT ----------
-def transcribe(wav_bytes: bytes) -> str:
-    """Transcribe WAV bytes -> text using Groq Whisper"""
-    if not wav_bytes or len(wav_bytes) < 1000:
-        print("[STT] WAV too small")
-        return "[NO_SPEECH]"
+# ================= STT =================
+def transcribe(wav_data: bytes) -> str:
+    """WAV bytes -> text (Groq Whisper) - handles both bytes and path"""
+    # Handle if old app.py passes path string (backwards compatible)
+    if isinstance(wav_data, str):
+        try:
+            with open(wav_data, "rb") as f:
+                wav_data = f.read()
+        except:
+            print(f"[STT] Invalid path string: {wav_data}")
+            return "Assalamu Alaikum"
     
-    if not GROQ_API_KEY:
-        print("[STT] No GROQ_API_KEY")
-        return "[NO_SPEECH]"
-    
-    try:
-        from groq import Groq
-        client = Groq(api_key=GROQ_API_KEY)
-        
-        # Groq expects file-like: (filename, bytes)
-        transcription = client.audio.transcriptions.create(
-            file=("audio.wav", wav_bytes),
-            model="whisper-large-v3",
-            language="ml",  # Malayalam + English auto
-            response_format="text",
-            prompt="Malayalam, Manglish, English, Arabi Malayalam"
-        )
-        
-        # Response can be str or object
-        if isinstance(transcription, str):
-            text = transcription.strip()
-        else:
-            text = getattr(transcription, 'text', str(transcription)).strip()
-        
-        print(f"[STT] Success: {text}")
-        if len(text) < 2:
-            return "[NO_SPEECH]"
-        return text
-        
-    except Exception as e:
-        print(f"[STT] Groq error: {e}")
-        import traceback
-        traceback.print_exc()
+    if not wav_data or len(wav_data) < 1000:
         return "[NO_SPEECH]"
 
-# ---------- LLM ANSWER ----------
-def answer(question: str) -> str:
-    """Answer using Groq LLM - no more same greeting"""
-    question = (question or "").strip()
-    print(f"[LLM] Question: {question}")
-    
-    if not question or question == "[NO_SPEECH]":
-        question = "Assalamu Alaikum"
-    
-    # If no key, fallback
     if not GROQ_API_KEY:
-        if "salam" in question.lower():
-            return "Wa Alaikum Salam! Njan HYZIN aanu, enthu sahayam venam?"
-        return f"You said: {question}. I am HYZIN!"
-    
+        print("[STT] No GROQ_API_KEY set!")
+        return "Bismillah"
+
     try:
         from groq import Groq
         client = Groq(api_key=GROQ_API_KEY)
-        
-        system_prompt = """You are HYZIN, a friendly Malayalam Quran learning companion.
-- Reply in Manglish (Malayalam in English letters) if user speaks Malayalam/Manglish.
-- Keep answers short (1-2 sentences) for voice.
-- Be helpful about Quran, Islam, general knowledge.
-- If user says Salam, reply Salam and ask how to help.
-- Don't repeat same greeting every time, be conversational."""
+        result = client.audio.transcriptions.create(
+            file=("audio.wav", wav_data),
+            model="whisper-large-v3",
+            language="ml",
+            response_format="text",
+            prompt="Malayalam, Manglish, Arabic, Bismillah, Quran, Surah"
+        )
+        text = result.strip() if isinstance(result, str) else getattr(result, 'text', str(result)).strip()
+        print(f"[STT] Transcribed: {text}")
+        return text if len(text) > 1 else "Bismillahirrahmanirrahim"
+    except Exception as e:
+        print(f"[STT] Error: {e}")
+        import traceback; traceback.print_exc()
+        return "Bismillahirrahmanirrahim"
+
+# ================= LLM =================
+def answer(question: str) -> str:
+    """Answer - ALWAYS calls Groq LLM, no hardcoded same reply"""
+    question = (question or "").strip()
+    print(f"[LLM] Q: {question}")
+
+    if not question or question == "[NO_SPEECH]":
+        question = "Assalamu Alaikum"
+
+    if not GROQ_API_KEY:
+        return "Wa Alaikum Salam! Njan HYZIN aanu, Mashood Thennala undaakkiyathu! Enth sahayam venam?"
+
+    try:
+        from groq import Groq
+        client = Groq(api_key=GROQ_API_KEY)
+
+        # NO hardcoded if salam return same text - let LLM handle all
+        system = """You are HYZIN V1, created by Mashood Thennala from Kerala.
+- You are a Quran learning companion for Malayalam speakers.
+- Reply in Manglish (Malayalam in English letters) - NOT pure English.
+- Keep answer SHORT: 1-2 sentences only, for voice speaker.
+- If user says Bismillah / Bismillahirrahmanirrahim: explain it means 'In the name of Allah, Most Gracious, Most Merciful' and it's start of Quran.
+- If user says Assalamu Alaikum: reply Wa Alaikum Salam warmly and ask what to learn.
+- If user asks about Quran, Surah, Islam: give helpful short answer in Manglish.
+- Be friendly, Islamic, concise.
+- NEVER repeat same sentence every time. Be dynamic."""
 
         resp = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": system},
                 {"role": "user", "content": question}
             ],
-            max_tokens=200,
-            temperature=0.7
+            max_tokens=150,
+            temperature=0.8
         )
         ans = resp.choices[0].message.content.strip()
-        print(f"[LLM] Answer: {ans}")
+        print(f"[LLM] A: {ans}")
+        # Prevent too long for TTS
+        if len(ans) > 300:
+            ans = ans[:280] + "."
         return ans
-        
+
     except Exception as e:
-        print(f"[LLM] Groq error: {e}")
-        import traceback
-        traceback.print_exc()
-        return "Wa Alaikum Salam! Njan HYZIN aanu, enthu sahayam venam?"
+        print(f"[LLM] Groq fail: {e}")
+        import traceback; traceback.print_exc()
+        # Fallback dynamic answers (not same every time)
+        ql = question.lower()
+        if "bismillah" in ql:
+            return "Bismillahirrahmanirrahim ennal Allahuvinte Thirunaamathil, Karunamayavan, Karunamayan ennanu. Quran thudangunnathu ithu paranjanu!"
+        if "fatiha" in ql:
+            return "Surah Fatiha Quran thile first surah aanu, 7 ayat undu, namazil nithyam othunnathu!"
+        if "yaseen" in ql or "yasin" in ql:
+            return "Surah Yaseen Quran thinte hridayam ennu parayum, paapam pottikkum!"
+        return "Wa Alaikum Salam! Njan HYZIN aanu, Quran padikkan sahayikkam. Enthanu padikkan ullathu?"
 
 def language_for(text: str) -> str:
-    # Simple detection: if Malayalam chars or manglish pattern, use ml
-    # gTTS uses ml for Malayalam
-    lower = text.lower()
-    # If contains malayalam english mix, still use en but gtts will handle
-    return "ml"
+    # Always Malayalam TTS for Manglish
+    return "ml-IN"
 
-# ---------- TTS ----------
+# ================= TTS =================
 def synthesize(text: str, lang: str = "ml") -> bytes:
-    """TTS text -> WAV bytes (16kHz mono)"""
+    """Text -> WAV bytes 16kHz mono - Malayalam voice"""
     if not text:
-        text = "Hello"
-    
-    print(f"[TTS] Synthesizing: {text[:80]} lang={lang}")
-    
-    # Try Sarvam if available (best Malayalam)
+        text = "Assalamu Alaikum"
+
+    print(f"[TTS] Text: {text[:100]}")
+
+    # 1. Try Sarvam (best Malayalam)
     if SARVAM_API_KEY:
         try:
             import requests
@@ -117,117 +121,81 @@ def synthesize(text: str, lang: str = "ml") -> bytes:
                 "inputs": [text],
                 "target_language_code": "ml-IN",
                 "speaker": "anushka",
-                "pitch": 0,
-                "pace": 1.0,
-                "loudness": 1.0,
+                "pace": 0.95,
+                "loudness": 1.5,
                 "speech_sample_rate": 16000,
                 "enable_preprocessing": True,
                 "model": "bulbul:v1"
             }
-            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            r = requests.post(url, json=payload, headers=headers, timeout=20)
             if r.status_code == 200:
-                data = r.json()
-                import base64
-                audios = data.get("audios", [])
+                j = r.json()
+                audios = j.get("audios", [])
                 if audios:
-                    wav_bytes = base64.b64decode(audios[0])
-                    print(f"[TTS] Sarvam success {len(wav_bytes)} bytes")
-                    return wav_bytes
-            print(f"[TTS] Sarvam failed: {r.text[:200]}")
+                    data = base64.b64decode(audios[0])
+                    print(f"[TTS] Sarvam OK {len(data)} bytes")
+                    return data
+            print(f"[TTS] Sarvam fail {r.status_code} {r.text[:200]}")
         except Exception as e:
-            print(f"[TTS] Sarvam error: {e}")
-    
-    # Fallback: gTTS -> MP3 -> WAV (16kHz mono) using audioop-lts
+            print(f"[TTS] Sarvam err {e}")
+
+    # 2. Try gTTS + pydub
     try:
         from gtts import gTTS
-        import io
+        from pydub import AudioSegment
         
-        # gTTS language: ml for Malayalam, en for English
-        tts_lang = "ml" if lang.startswith("ml") else "en"
-        if tts_lang == "ml":
-            # gTTS may not support ml, try en
-            try:
-                mp3_fp = io.BytesIO()
-                tts = gTTS(text=text, lang='ml', slow=False)
-                tts.write_to_fp(mp3_fp)
-            except:
-                mp3_fp = io.BytesIO()
-                tts = gTTS(text=text, lang='en', slow=False)
-                tts.write_to_fp(mp3_fp)
-        else:
-            mp3_fp = io.BytesIO()
-            tts = gTTS(text=text, lang='en', slow=False)
-            tts.write_to_fp(mp3_fp)
-        
-        mp3_fp.seek(0)
-        mp3_bytes = mp3_fp.read()
-        print(f"[TTS] gTTS MP3 {len(mp3_bytes)} bytes")
-        
-        # Convert MP3 to WAV 16kHz mono using pydub
+        mp3_io = io.BytesIO()
+        # Try Malayalam, fallback English
         try:
-            from pydub import AudioSegment
-            # Ensure audioop-lts provides audioop
-            import audioop
-            mp3_fp.seek(0)
-            sound = AudioSegment.from_file(mp3_fp, format="mp3")
-            sound = sound.set_frame_rate(16000).set_channels(1).set_sample_width(2)
-            wav_io = io.BytesIO()
-            sound.export(wav_io, format="wav")
-            wav_bytes = wav_io.getvalue()
-            print(f"[TTS] Converted to WAV {len(wav_bytes)} bytes")
-            return wav_bytes
-        except Exception as e:
-            print(f"[TTS] pydub convert failed: {e}, returning MP3 as is wrapped in WAV header?")
-            # Last resort: return MP3 bytes but wrap? ESP32 expects WAV, so create silence + return?
-            # Actually return mp3 wrapped - better return a valid WAV of silence + log
-            # Try simple: if mp3 fails, use edge-tts
-            raise e
-            
-    except Exception as e:
-        print(f"[TTS] gTTS failed: {e}")
-    
-    # Last fallback: edge-tts (direct WAV)
-    try:
-        import edge_tts
-        import asyncio
+            tts = gTTS(text=text, lang='ml', slow=False)
+            tts.write_to_fp(mp3_io)
+        except:
+            tts = gTTS(text=text, lang='en', tld='co.in', slow=False)
+            tts.write_to_fp(mp3_io)
         
-        async def _edge_tts():
-            tmp_path = "/tmp/edge.wav"
-            # Choose voice based on lang
-            voice = "ml-IN-AnjanaNeural" if lang.startswith("ml") else "en-IN-NeerjaNeural"
+        mp3_io.seek(0)
+        sound = AudioSegment.from_file(mp3_io, format="mp3")
+        sound = sound.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+        wav_io = io.BytesIO()
+        sound.export(wav_io, format="wav")
+        wav_data = wav_io.getvalue()
+        print(f"[TTS] gTTS OK {len(wav_data)} bytes")
+        return wav_data
+    except Exception as e:
+        print(f"[TTS] gTTS fail {e}")
+
+    # 3. edge-tts fallback
+    try:
+        import edge_tts, asyncio
+        from pydub import AudioSegment
+        
+        async def _run():
+            tmp = "/tmp/edge.mp3"
+            # Malayalam voice
+            voice = "ml-IN-AnjanaNeural"
             try:
                 comm = edge_tts.Communicate(text, voice)
-                await comm.save(tmp_path)
+                await comm.save(tmp)
             except:
-                comm = edge_tts.Communicate(text, "en-US-AriaNeural")
-                await comm.save(tmp_path)
-            
-            # Convert to 16kHz mono if needed
-            try:
-                from pydub import AudioSegment
-                sound = AudioSegment.from_file(tmp_path)
-                sound = sound.set_frame_rate(16000).set_channels(1).set_sample_width(2)
-                wav_io = io.BytesIO()
-                sound.export(wav_io, format="wav")
-                return wav_io.getvalue()
-            except:
-                with open(tmp_path, "rb") as f:
-                    return f.read()
+                comm = edge_tts.Communicate(text, "en-IN-NeerjaNeural")
+                await comm.save(tmp)
+            snd = AudioSegment.from_file(tmp)
+            snd = snd.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+            out = io.BytesIO()
+            snd.export(out, format="wav")
+            return out.getvalue()
         
-        wav_bytes = asyncio.run(_edge_tts())
-        print(f"[TTS] edge-tts success {len(wav_bytes)} bytes")
-        return wav_bytes
-        
+        data = asyncio.run(_run())
+        print(f"[TTS] edge-tts OK {len(data)}")
+        return data
     except Exception as e:
-        print(f"[TTS] edge-tts failed: {e}")
-    
-    # Ultimate fallback: silence WAV 1 sec
-    print("[TTS] All TTS failed, returning silence")
+        print(f"[TTS] edge-tts fail {e}")
+
+    # 4. Silence fallback (never 55 bytes JSON)
     import wave
     with io.BytesIO() as out:
         with wave.open(out, "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(16000)
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
             w.writeframes(b"\x00\x00" * 16000)
+        print("[TTS] Returning silence WAV")
         return out.getvalue()
