@@ -133,3 +133,9 @@ async def root():
 @app.get("/health")
 async def health():
     return {"ok": True}
+    
+import os
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port)
