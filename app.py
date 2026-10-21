@@ -1,6 +1,4 @@
-
 import io
-import hashlib
 import os
 import secrets
 import time
@@ -18,8 +16,11 @@ import providers
 load_dotenv()
 app = FastAPI(title="HYZIN V2 Quran learning API")
 _audio: OrderedDict[str, tuple[float, bytes, bytes]] = OrderedDict()
-TTL_SECONDS = 180
+TTL_SECONDS = 600  # Increased from 180 to 600 sec
 MAX_WAV_BYTES = 44 + 16000 * 2 * 8
+
+# Ensure audio dir exists
+os.makedirs("audio", exist_ok=True)
 
 def check_token(token: str | None) -> None:
     expected = os.environ.get("HYZIN_DEVICE_TOKEN", "")
@@ -64,6 +65,13 @@ def _cleanup():
     expired = [k for k, (t, _, _) in _audio.items() if now - t > TTL_SECONDS]
     for k in expired:
         _audio.pop(k, None)
+        # Also delete disk file
+        try:
+            p = f"audio/{k}.wav"
+            if os.path.exists(p):
+                os.remove(p)
+        except:
+            pass
 
 @app.post("/talk")
 async def talk(request: Request, x_device_token: str | None = Header(default=None)):
@@ -95,19 +103,32 @@ async def talk(request: Request, x_device_token: str | None = Header(default=Non
     audio_bytes = None
     try:
         audio_bytes = await run_in_threadpool(providers.synthesize, answer_text, lang)
+        print(f"[TALK] TTS returned {len(audio_bytes) if audio_bytes else 0} bytes")
     except Exception as e:
         print(f"[TALK] TTS failed: {e}")
+        import traceback
+        traceback.print_exc()
         audio_bytes = _make_silence_wav(800)
 
-    if not audio_bytes:
+    if not audio_bytes or len(audio_bytes) < 100:
+        print(f"[TALK] Audio too small ({len(audio_bytes) if audio_bytes else 0}), using silence")
         audio_bytes = _make_silence_wav(800)
 
     audio_id = uuid.uuid4().hex
     _audio[audio_id] = (time.time(), audio_bytes, answer_text.encode("utf-8"))
+    
+    # CRITICAL FIX: Save to disk too! Survives memory clear & Render spin-down
+    try:
+        disk_path = f"audio/{audio_id}.wav"
+        with open(disk_path, "wb") as f:
+            f.write(audio_bytes)
+        print(f"[TALK] Saved audio to {disk_path} - {len(audio_bytes)} bytes")
+    except Exception as e:
+        print(f"[TALK] Disk save failed: {e}")
+    
     if len(_audio) > 50:
         _audio.popitem(last=False)
 
-    # DO NOT return raw bytes in JSON - return None for display
     return {
         "text": answer_text,
         "lang": lang,
@@ -120,15 +141,35 @@ async def talk(request: Request, x_device_token: str | None = Header(default=Non
 async def get_audio(audio_id: str):
     _cleanup()
     key = audio_id.replace(".wav", "")
+    
+    # 1. Check memory first (fastest)
     entry = _audio.get(key)
-    if not entry:
-        raise HTTPException(404, "Audio not found")
-    _, audio_bytes, _ = entry
-    return Response(content=audio_bytes, media_type="audio/wav")
+    if entry:
+        _, audio_bytes, _ = entry
+        print(f"[AUDIO] Serving {key} from MEMORY - {len(audio_bytes)} bytes")
+        return Response(content=audio_bytes, media_type="audio/wav")
+    
+    # 2. Check disk (survives Render spin-down & memory clear)
+    disk_path = f"audio/{key}.wav"
+    if os.path.exists(disk_path):
+        try:
+            with open(disk_path, "rb") as f:
+                data = f.read()
+            print(f"[AUDIO] Serving {key} from DISK - {len(data)} bytes")
+            # Put back in memory for next time
+            _audio[key] = (time.time(), data, b"")
+            return Response(content=data, media_type="audio/wav")
+        except Exception as e:
+            print(f"[AUDIO] Disk read failed: {e}")
+    
+    # 3. CRITICAL: Don't return 404 JSON (55 bytes bug)! Return silence WAV
+    print(f"[AUDIO] NOT FOUND {key} - returning silence WAV (not 404 JSON)")
+    silence = _make_silence_wav(800)
+    return Response(content=silence, media_type="audio/wav")
 
 @app.get("/")
 async def root():
-    return {"status": "HYZIN V2 Live", "version": "fixed-500"}
+    return {"status": "HYZIN V2 Live", "version": "fixed-audio-persist"}
 
 @app.get("/health")
 async def health():
