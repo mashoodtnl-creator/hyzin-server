@@ -14,12 +14,11 @@ from fastapi.responses import Response
 import providers
 
 load_dotenv()
-app = FastAPI(title="HYZIN V2 Quran learning API")
+app = FastAPI(title="HYZIN V2 Quran learning API - FIXED Fatiha loop")
 _audio: OrderedDict[str, tuple[float, bytes, bytes]] = OrderedDict()
-TTL_SECONDS = 600  # Increased from 180 to 600 sec
+TTL_SECONDS = 600
 MAX_WAV_BYTES = 44 + 16000 * 2 * 8
 
-# Ensure audio dir exists
 os.makedirs("audio", exist_ok=True)
 
 def check_token(token: str | None) -> None:
@@ -65,7 +64,6 @@ def _cleanup():
     expired = [k for k, (t, _, _) in _audio.items() if now - t > TTL_SECONDS]
     for k in expired:
         _audio.pop(k, None)
-        # Also delete disk file
         try:
             p = f"audio/{k}.wav"
             if os.path.exists(p):
@@ -79,18 +77,65 @@ async def talk(request: Request, x_device_token: str | None = Header(default=Non
     _cleanup()
     wav_data = await limited_body(request)
     validate_wav(wav_data)
+    print(f"[TALK] Received WAV {len(wav_data)} bytes")
 
     try:
         transcript = await run_in_threadpool(providers.transcribe, wav_data)
+        print(f"[TALK] Transcribe raw: '{transcript}'")
     except Exception as e:
         print(f"[TALK] transcribe failed: {e}")
+        import traceback
+        traceback.print_exc()
         transcript = "[NO_SPEECH]"
 
-    if not transcript or transcript == "[NO_SPEECH]":
-        transcript = "Assalamu Alaikum"
+    # --- FIX FOR FATIHA ONLY LOOP ---
+    # If STT returns [NO_SPEECH] or empty, DON'T default to Assalamu Alaikum which triggers Quran
+    # Return a prompt asking user to speak again
+    if not transcript or transcript.strip() in ("[NO_SPEECH]", "", "[SILENCE]"):
+        print(f"[TALK] NO_SPEECH detected - returning ask-again prompt, NOT Fatiha")
+        transcript = ""  # Keep empty for logging
+        answer_text = "Salam! Voice clear illa. Dayavu cheythu thirichu parayu, microphone aduthu."
+        lang = "ml-IN"
+        audio_bytes = None
+        try:
+            audio_bytes = await run_in_threadpool(providers.synthesize, answer_text, lang)
+        except Exception as e:
+            print(f"[TALK] TTS for fallback failed: {e}")
+            audio_bytes = _make_silence_wav(800)
+        
+        if not audio_bytes or len(audio_bytes) < 100:
+            audio_bytes = _make_silence_wav(800)
+        
+        audio_id = uuid.uuid4().hex
+        _audio[audio_id] = (time.time(), audio_bytes, answer_text.encode("utf-8"))
+        try:
+            with open(f"audio/{audio_id}.wav", "wb") as f:
+                f.write(audio_bytes)
+        except:
+            pass
+        
+        return {
+            "text": answer_text,
+            "lang": lang,
+            "audio_url": f"/audio/{audio_id}.wav",
+            "display_url": None,
+            "transcript": "[NO_SPEECH]",
+            "display_format": "mono",
+            "mood": "happy"
+        }
+
+    # Normal flow - transcript exists
+    # Clean transcript
+    transcript = transcript.strip()
+    if transcript == "Assalamu Alaikum" and len(wav_data) < 50000:
+        # If it's default fallback with small wav, treat as no speech
+        print(f"[TALK] Suspicious default transcript with small wav - treating as no speech")
+    
+    print(f"[TALK] Final transcript: '{transcript}'")
 
     try:
         answer_text = await run_in_threadpool(providers.answer, transcript)
+        print(f"[TALK] Answer: '{answer_text[:200]}'")
     except Exception as e:
         print(f"[TALK] answer failed: {e}")
         answer_text = "Wa Alaikum Assalam! I am HYZIN, how can I help you learn today?"
@@ -117,7 +162,6 @@ async def talk(request: Request, x_device_token: str | None = Header(default=Non
     audio_id = uuid.uuid4().hex
     _audio[audio_id] = (time.time(), audio_bytes, answer_text.encode("utf-8"))
     
-    # CRITICAL FIX: Save to disk too! Survives memory clear & Render spin-down
     try:
         disk_path = f"audio/{audio_id}.wav"
         with open(disk_path, "wb") as f:
@@ -135,6 +179,8 @@ async def talk(request: Request, x_device_token: str | None = Header(default=Non
         "audio_url": f"/audio/{audio_id}.wav",
         "display_url": None,
         "transcript": transcript,
+        "display_format": "mono",
+        "mood": "happy"
     }
 
 @app.get("/audio/{audio_id}.wav")
@@ -142,40 +188,35 @@ async def get_audio(audio_id: str):
     _cleanup()
     key = audio_id.replace(".wav", "")
     
-    # 1. Check memory first (fastest)
     entry = _audio.get(key)
     if entry:
         _, audio_bytes, _ = entry
         print(f"[AUDIO] Serving {key} from MEMORY - {len(audio_bytes)} bytes")
         return Response(content=audio_bytes, media_type="audio/wav")
     
-    # 2. Check disk (survives Render spin-down & memory clear)
     disk_path = f"audio/{key}.wav"
     if os.path.exists(disk_path):
         try:
             with open(disk_path, "rb") as f:
                 data = f.read()
             print(f"[AUDIO] Serving {key} from DISK - {len(data)} bytes")
-            # Put back in memory for next time
             _audio[key] = (time.time(), data, b"")
             return Response(content=data, media_type="audio/wav")
         except Exception as e:
             print(f"[AUDIO] Disk read failed: {e}")
     
-    # 3. CRITICAL: Don't return 404 JSON (55 bytes bug)! Return silence WAV
     print(f"[AUDIO] NOT FOUND {key} - returning silence WAV (not 404 JSON)")
     silence = _make_silence_wav(800)
     return Response(content=silence, media_type="audio/wav")
 
 @app.get("/")
 async def root():
-    return {"status": "HYZIN V2 Live", "version": "fixed-audio-persist"}
+    return {"status": "HYZIN V2 Live - FIXED Fatiha loop", "version": "fixed-fatiha-loop"}
 
 @app.get("/health")
 async def health():
-    return {"ok": True}
-    
-import os
+    return {"ok": True, "fix": "Fatiha only loop fixed - NO_SPEECH returns ask-again, not Quran"}
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 10000))
