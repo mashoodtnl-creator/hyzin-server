@@ -5,6 +5,7 @@ groq
 google-generativeai
 gtts
 pydub
+pyaudioop
 requests
 fastapi>=0.115,<1
 uvicorn[standard]>=0.34,<1
